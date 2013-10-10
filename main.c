@@ -17,7 +17,18 @@ static const struct symbol_def symbol_defs[] = {
     { "libSDL-1.2.so.0", "SDL_Init" }
 };
 
-// Searches and returns the link_map of the dynamic linker
+// function the linker uses for the hashes in the GNU_HASH section
+static uint32_t gnu_hash(const char* s)
+{
+    uint32_t h = 5381;
+    for (unsigned char c = *s; c != '\0'; c = *++s)
+    {
+        h = h * 33 + c;
+    }
+
+    return h & 0xffffffff;
+}
+
 static const struct link_map* get_link_map()
 {
     // The symbol itself marks the the start of the executable, it's not a pointer
@@ -32,69 +43,80 @@ static const struct link_map* get_link_map()
     // Yay! We got the global offset table!
     void** got = (void*)dyn->d_un.d_ptr;
 
-    printf("found GOT at %p\n", got);
-
     // get the second GOT-entry, it's a pointer to the link map
     return got[1];
 }
 
-static void get_tables(const struct link_map* map,
-        const Elf32_Sym** sym, const char** str, unsigned long* nchains)
+static const struct link_map* link_map_entry_for_library(const char* library)
 {
-    *sym = NULL;
-    *str = NULL;
-    *nchains = 0;
-
-    for (const Elf32_Dyn* dyn = (const Elf32_Dyn*)map->l_ld; dyn->d_tag != DT_NULL; dyn++)
+    for (const struct link_map* map = get_link_map(); map != NULL; map = map->l_next)
     {
-        switch (dyn->d_tag)
+        if (map->l_name && strcmp(basename(map->l_name), library) == 0)
         {
-            case DT_HASH:
-            case DT_GNU_HASH:
-                printf("found hashtab at 0x%x\n", dyn->d_un.d_ptr + 4);
-                *nchains = *(unsigned long*)(dyn->d_un.d_ptr + 4);
-                break;
-
-            case DT_SYMTAB:
-                printf("found symtab at 0x%x\n", dyn->d_un.d_ptr);
-                *sym = (const Elf32_Sym*)dyn->d_un.d_ptr;
-                break;
-
-            case DT_STRTAB:
-                printf("found strtab at 0x%x\n", dyn->d_un.d_ptr);
-                *str = (const char*)dyn->d_un.d_ptr;
-                break;
+            return map;
         }
     }
+
+    fprintf(stderr, "failed to locate link-map-entry for library %s\n", library);
+    return NULL;
+}
+
+static const void* get_table(const struct link_map* map, int type)
+{
+    for (const Elf32_Dyn* dyn = (const Elf32_Dyn*)map->l_ld; dyn->d_tag != DT_NULL; dyn++)
+    {
+        if (dyn->d_tag == type)
+        {
+            return (void*)dyn->d_un.d_ptr;
+        }
+    }
+
+    fprintf(stderr, "failed to locate dyn-section of type %i for library %s\n", type, map->l_name);
+    return NULL;
 }
 
 static void* resolve_symbol(const char* library, const char* symbol)
 {
-    for (const struct link_map* map = get_link_map(); map != NULL; map = map->l_next)
+    const struct link_map* map = link_map_entry_for_library(library);
+
+    if (!map)
     {
-        printf("found link-map entry for '%s'\n", map->l_name);
+        return NULL;
+    }
 
-        if (map->l_name && strcmp(basename(map->l_name), library) == 0)
+    const uint32_t* hashtab = get_table(map, DT_GNU_HASH);
+    const Elf32_Sym* symtab = get_table(map, DT_SYMTAB);
+    const char* strtab = get_table(map, DT_STRTAB);
+
+    uint32_t nbuckets = hashtab[0];
+    uint32_t symndx = hashtab[1];
+    uint32_t maskwords = hashtab[2];
+    // index 3 is used for a 'fast-reject-filter' we just ignore
+    const uint32_t* buckets = &hashtab[4 + maskwords];
+    const uint32_t* values = &hashtab[4 + maskwords + nbuckets];
+
+    uint32_t hash = gnu_hash(symbol);
+
+    uint32_t chain = buckets[hash % nbuckets];
+    if (chain == 0)
+    {
+        fprintf(stderr, "hash of symbol %s in %s refers to empty chain\n", symbol, library);
+        return NULL;
+    }
+
+    const Elf32_Sym* sym = &symtab[chain];
+    const uint32_t* chain_ptr = &values[chain - symndx];
+
+    // last bit is unset for all but the last entry of the chain
+    for (; *chain_ptr & 1; sym++, chain_ptr++)
+    {
+        if ((hash & ~1) == (*chain_ptr & ~1) && strcmp(symbol, strtab + sym->st_name) == 0)
         {
-            const Elf32_Sym* sym;
-            const char* str;
-            unsigned long nchains;
-
-            get_tables(map, &sym, &str, &nchains);
-
-            for (size_t i = 0; i < nchains; i++)
-            {
-                printf("found symbol '%s' at 0x%x\n", &str[sym[i].st_name], sym[i].st_value);
-                if (strcmp(&str[sym[i].st_name], symbol) == 0)
-                {
-                    return (void*)sym[i].st_value;
-                }
-            }
-
-            return NULL;
+            return (void*)(map->l_addr + sym->st_value);
         }
     }
 
+    fprintf(stderr, "failed to resolve symbol %s in %s\n", symbol, library);
     return NULL;
 }
 
@@ -102,7 +124,7 @@ int main(int argc, char** argv)
 {
     for (size_t i = 0; i < sizeof(symbol_defs) / sizeof(struct symbol_def); i++)
     {
-        void* dlopen_handle = dlopen("libSDL-1.2.so.0", RTLD_NOW);
+        void* dlopen_handle = dlopen(symbol_defs[i].library, RTLD_NOW);
         void* dlsym_address = dlsym(dlopen_handle, symbol_defs[i].symbol);
 
         void* address = resolve_symbol(symbol_defs[i].library, symbol_defs[i].symbol);
