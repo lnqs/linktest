@@ -1,21 +1,13 @@
+#define _GNU_SOURCE
 #include <elf.h>
 #include <link.h>
 #include <stdio.h>
 #include <string.h>
-#include <libgen.h>
 
 extern const void __executable_start; // provided by the ld's default linker-script
 
-// defines the libraries and symbols to find as test
-struct symbol_def
-{
-    const char* library;
-    const char* symbol;
-};
-
-static const struct symbol_def symbol_defs[] = {
-    { "libSDL-1.2.so.0", "SDL_Init" }
-};
+static const char* library_name = "./libtest.so";
+static const char* function_name = "test_function";
 
 // function the linker uses for the hashes in the GNU_HASH section
 static uint32_t gnu_hash(const char* s)
@@ -51,7 +43,7 @@ static const struct link_map* link_map_entry_for_library(const char* library)
 {
     for (const struct link_map* map = get_link_map(); map != NULL; map = map->l_next)
     {
-        if (map->l_name && strcmp(basename(map->l_name), library) == 0)
+        if (map->l_name && strcmp(basename(map->l_name), basename(library)) == 0)
         {
             return map;
         }
@@ -106,15 +98,16 @@ static void* resolve_symbol(const char* library, const char* symbol)
 
     const Elf32_Sym* sym = &symtab[chain];
     const uint32_t* chain_ptr = &values[chain - symndx];
-
-    // last bit is unset for all but the last entry of the chain
-    for (; *chain_ptr & 1; sym++, chain_ptr++)
+    do
     {
         if ((hash & ~1) == (*chain_ptr & ~1) && strcmp(symbol, strtab + sym->st_name) == 0)
         {
             return (void*)(map->l_addr + sym->st_value);
         }
-    }
+
+        sym += 1;
+        chain_ptr += 1;
+    } while (*chain_ptr & 1); // last bit is unset for all but the last entry of the chain
 
     fprintf(stderr, "failed to resolve symbol %s in %s\n", symbol, library);
     return NULL;
@@ -122,17 +115,31 @@ static void* resolve_symbol(const char* library, const char* symbol)
 
 int main(int argc, char** argv)
 {
-    for (size_t i = 0; i < sizeof(symbol_defs) / sizeof(struct symbol_def); i++)
+    void* dlopen_handle = dlopen(library_name, RTLD_NOW);
+    if (!dlopen_handle)
     {
-        void* dlopen_handle = dlopen(symbol_defs[i].library, RTLD_NOW);
-        void* dlsym_address = dlsym(dlopen_handle, symbol_defs[i].symbol);
-
-        void* address = resolve_symbol(symbol_defs[i].library, symbol_defs[i].symbol);
-
-        printf("programically located address %p of %s (in %s) %s address %p from dlsym() ",
-                address, symbol_defs[i].symbol, symbol_defs[i].library,
-                address == dlsym_address ? "matches" : "doesn't match",
-                dlsym_address);
+        fprintf(stderr, "failed to dlopen() %s(): %s\n", library_name, dlerror());
+        return 1;
     }
+
+    void (*dlsymloaded_func)() = dlsym(dlopen_handle, function_name);
+    if (!dlsymloaded_func)
+    {
+        fprintf(stderr, "failed to dlsym() for %s(): %s\n", function_name, dlerror());
+        return 1;
+    }
+
+    void (*selfloaded_func)() = resolve_symbol(library_name, function_name);
+    if (!selfloaded_func)
+    {
+        fprintf(stderr, "failed to locate %s()\n", function_name);
+        return 1;
+    }
+
+    fprintf(stderr, "calling %s() by pointer from dlsym():\n", function_name);
+    dlsymloaded_func();
+
+    fprintf(stderr, "calling %s() by programically located pointer):\n", function_name);
+    selfloaded_func();
 }
 
