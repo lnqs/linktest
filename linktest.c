@@ -9,14 +9,6 @@ extern const void __executable_start; // provided by the ld's default linker-scr
 static const char* library_name = "./libtest.so";
 static const char* function_name = "test_function";
 
-// TODO: comment. elf/dl-libc.c.
-struct dl_open_hook
-{
-    void *(*dlopen_mode) (const char *name, int mode);
-    void *(*dlsym) (void *map, const char *name);
-    int (*dlclose) (void *map);
-};
-
 // function the linker uses for the hashes in the GNU_HASH section
 static uint32_t gnu_hash(const char* s)
 {
