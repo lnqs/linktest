@@ -1,6 +1,6 @@
 CC = clang
 CFLAGS = -m32 -std=c99 -Wall -ggdb -O0
-LDFLAGS = -m32 -ldl
+LDFLAGS = -m32
 SOURCES = linktest.c
 OBJECTS = $(SOURCES:.c=.o)
 EXECUTABLE = linktest

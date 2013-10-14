@@ -9,6 +9,14 @@ extern const void __executable_start; // provided by the ld's default linker-scr
 static const char* library_name = "./libtest.so";
 static const char* function_name = "test_function";
 
+// TODO: comment. elf/dl-libc.c.
+struct dl_open_hook
+{
+    void *(*dlopen_mode) (const char *name, int mode);
+    void *(*dlsym) (void *map, const char *name);
+    int (*dlclose) (void *map);
+};
+
 // function the linker uses for the hashes in the GNU_HASH section
 static uint32_t gnu_hash(const char* s)
 {
@@ -113,21 +121,16 @@ static void* resolve_symbol(const char* library, const char* symbol)
     return NULL;
 }
 
+static void load_library(const char* filename)
+{
+    // Yay! Using internals of libc! Let's just cross fingers this won't change too fast :/
+    void* (*__libc_dlopen_mode)(const char*, int) = resolve_symbol("libc.so.6", "__libc_dlopen_mode");
+    __libc_dlopen_mode(filename, RTLD_NOW | RTLD_GLOBAL);
+}
+
 int main(int argc, char** argv)
 {
-    void* dlopen_handle = dlopen(library_name, RTLD_NOW);
-    if (!dlopen_handle)
-    {
-        fprintf(stderr, "failed to dlopen() %s(): %s\n", library_name, dlerror());
-        return 1;
-    }
-
-    void (*dlsymloaded_func)() = dlsym(dlopen_handle, function_name);
-    if (!dlsymloaded_func)
-    {
-        fprintf(stderr, "failed to dlsym() for %s(): %s\n", function_name, dlerror());
-        return 1;
-    }
+    load_library(library_name);
 
     void (*selfloaded_func)() = resolve_symbol(library_name, function_name);
     if (!selfloaded_func)
@@ -136,10 +139,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    fprintf(stderr, "calling %s() by pointer from dlsym():\n", function_name);
-    dlsymloaded_func();
-
-    fprintf(stderr, "calling %s() by programically located pointer):\n", function_name);
+    fprintf(stderr, "calling %s() by programically located pointer:\n", function_name);
     selfloaded_func();
 }
 
