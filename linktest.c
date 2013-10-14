@@ -107,7 +107,7 @@ static void* resolve_symbol(const char* library, const char* symbol)
 
         sym += 1;
         chain_ptr += 1;
-    } while (*chain_ptr & 1); // last bit is set for all but the last entry of the chain
+    } while (sym->st_name & 1); // last bit is set for all but the last entry of the chain
 
     fprintf(stderr, "failed to resolve symbol %s in %s\n", symbol, library);
     return NULL;
